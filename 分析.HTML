@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<title>多影片逐幀標註工具（方向鍵修正版）</title>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<style>
+body { font-family: sans-serif; text-align: center; background: #fafafa; }
+#videoContainer {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  border: 1px solid #aaa;
+  width: 80%;
+  max-width: 800px;
+  cursor: grab;
+  margin-top: 10px;
+}
+#video {
+  width: 100%;
+  transform-origin: center center;
+  transition: transform 0.05s ease-out;
+}
+#controls { margin-top: 10px; }
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+  justify-content: center;
+  width: 50%;
+  margin: 10px auto;
+}
+label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #ccc;
+  padding: 4px;
+  border-radius: 4px;
+  background: white;
+}
+button { margin: 5px; padding: 6px 12px; cursor: pointer; border-radius: 6px; }
+select { padding: 4px; margin: 8px; }
+</style>
+</head>
+<body>
+
+<h1>多影片逐幀標註工具</h1>
+
+<input type="file" id="videoInput" accept="video/*" multiple><br>
+
+<select id="videoSelector"></select><br>
+
+<div id="videoContainer">
+  <video id="video" preload="metadata"></video>
+</div>
+
+<div id="controls">
+  <button id="playPause">▶ 播放</button>
+  <button id="prev">← 上一幀</button>
+  <button id="next">下一幀 →</button>
+  <span>時間：<span id="timeDisplay">0</span>s</span>
+</div>
+
+<h3>請勾選符合條件的項目：</h3>
+<div class="checkbox-grid" id="checkboxes"></div>
+
+<div>
+  <button id="resetBtn">🧹 重製勾選</button>
+  <button id="restoreBtn">♻️ 復原上一部</button>
+  <button id="exportBtn">💾 匯出全部 Excel</button>
+</div>
+
+<script>
+const video = document.getElementById('video');
+const container = document.getElementById('videoContainer');
+const videoInput = document.getElementById('videoInput');
+const selector = document.getElementById('videoSelector');
+const checkboxesDiv = document.getElementById('checkboxes');
+const timeDisplay = document.getElementById('timeDisplay');
+const playPauseBtn = document.getElementById('playPause');
+const fps = 1;
+
+let videoList = [];
+let currentVideoIndex = 0;
+let framesData = {};
+let currentFrame = 0;
+let isPlaying = false;
+let playInterval = null;
+
+// Zoom
+let scale = 1, posX = 0, posY = 0;
+let dragging = false, startX, startY;
+
+// 建立 8 個勾選框
+const itemNames = [
+  "Anterior and Posterior transverse mantle line",
+  "Anterior head bar",
+  "Eye ring",
+  "Interocular black small streak",
+  "Interocular Black Stripe",
+  "Mantle edge radial stripes",
+  "Paired mantle spots",
+  "Spark-like black dots"
+];
+
+for (let i = 0; i < itemNames.length; i++) {
+  const label = document.createElement('label');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.id = `item${i + 1}`;
+  cb.addEventListener('change', updateLabels);
+  label.appendChild(cb);
+  label.appendChild(document.createTextNode(itemNames[i]));
+  checkboxesDiv.appendChild(label);
+}
+
+
+// 上傳影片
+videoInput.addEventListener('change', e => {
+  const files = Array.from(e.target.files);
+  videoList = files.map(f => ({
+    name: f.name,
+    url: URL.createObjectURL(f),
+    duration: 0
+  }));
+
+  selector.innerHTML = '';
+  videoList.forEach((v, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = v.name;
+    selector.appendChild(opt);
+  });
+
+  currentVideoIndex = 0;
+  loadVideo(0);
+});
+
+// 載入影片
+function loadVideo(index) {
+  currentVideoIndex = index;
+  const v = videoList[index];
+  video.src = v.url;
+  video.load();
+
+  video.onloadedmetadata = () => {
+    v.duration = video.duration;
+    const totalFrames = Math.floor(v.duration * fps);
+    if (!framesData[v.name]) {
+      framesData[v.name] = Array.from({length: totalFrames}, (_, i) => ({
+        frameIndex: i,
+        timeSec: i + 1,
+        labels: Object.fromEntries(Array.from({length: 10}, (_, j) => [j+1, false]))
+      }));
+    }
+    currentFrame = 0;
+    video.currentTime = 0;
+    showFrame(0);
+  };
+}
+
+// 切換影片
+selector.addEventListener('change', e => loadVideo(parseInt(e.target.value)));
+
+// 播放控制
+playPauseBtn.onclick = () => {
+  if (isPlaying) stopPlay(); else startPlay();
+};
+function startPlay() {
+  isPlaying = true;
+  playPauseBtn.textContent = "⏸ 暫停";
+  playInterval = setInterval(nextFrame, 1000 / fps);
+}
+function stopPlay() {
+  isPlaying = false;
+  playPauseBtn.textContent = "▶ 播放";
+  clearInterval(playInterval);
+}
+
+// 幀控制
+document.getElementById('prev').onclick = prevFrame;
+document.getElementById('next').onclick = nextFrame;
+function prevFrame() {
+  if (currentFrame > 0) showFrame(currentFrame - 1);
+}
+function nextFrame() {
+  const f = framesData[getCurrentVideoName()];
+  if (currentFrame < f.length - 1) showFrame(currentFrame + 1);
+}
+
+// 方向鍵控制（僅控制幀數，不切換影片）
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowLeft') { e.preventDefault(); prevFrame(); }
+  if (e.key === 'ArrowRight') { e.preventDefault(); nextFrame(); }
+  if (e.key === ' ') { e.preventDefault(); playPauseBtn.click(); }
+});
+
+// 顯示幀
+function showFrame(index) {
+  const videoName = getCurrentVideoName();
+  const f = framesData[videoName];
+  if (!f) return;
+  currentFrame = index;
+  video.currentTime = index / fps;
+  timeDisplay.textContent = f[index].timeSec;
+  for (let i = 1; i <= 10; i++) {
+    document.getElementById(`item${i}`).checked = f[index].labels[i];
+  }
+}
+
+// 更新勾選
+function updateLabels() {
+  const f = framesData[getCurrentVideoName()][currentFrame];
+  for (let i = 1; i <= 10; i++) {
+    f.labels[i] = document.getElementById(`item${i}`).checked;
+  }
+  saveState();
+}
+
+// 匯出所有影片
+document.getElementById('exportBtn').onclick = () => {
+  const wb = XLSX.utils.book_new();
+
+  for (const [videoName, frames] of Object.entries(framesData)) {
+    const header = [" "].concat(frames.map(f => `${f.timeSec}(秒)`));
+    const rows = [header];
+    for (let i = 1; i <= 10; i++) {
+      const row = [`項目${i}`];
+      frames.forEach(f => row.push(f.labels[i] ? 1 : 0));
+      rows.push(row);
+    }
+    const ws = XLSX.utils.aoa_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, videoName.slice(0, 20));
+  }
+
+  XLSX.writeFile(wb, "多影片標註結果.xlsx");
+};
+
+// 重製
+document.getElementById('resetBtn').onclick = () => {
+  if (!confirm("確定要清除當前影片的所有勾選嗎？")) return;
+  const frames = framesData[getCurrentVideoName()];
+  frames.forEach(f => { for (let i = 1; i <= 10; i++) f.labels[i] = false; });
+  showFrame(currentFrame);
+  saveState();
+};
+
+// 復原
+document.getElementById('restoreBtn').onclick = restoreState;
+
+// 儲存狀態
+function saveState() {
+  localStorage.setItem('multiVideoState', JSON.stringify({framesData, videoList}));
+}
+function restoreState() {
+  const saved = localStorage.getItem('multiVideoState');
+  if (!saved) return alert("沒有可復原的資料");
+  const obj = JSON.parse(saved);
+  framesData = obj.framesData;
+  videoList = obj.videoList || [];
+  selector.innerHTML = '';
+  videoList.forEach((v, i) => {
+    const opt = document.createElement('option');
+    opt.value = i;
+    opt.textContent = v.name;
+    selector.appendChild(opt);
+  });
+  loadVideo(0);
+  alert("已復原先前標註資料！");
+}
+
+// Zoom + Pan
+container.addEventListener('wheel', e => {
+  e.preventDefault();
+  const delta = e.deltaY > 0 ? 0.9 : 1.1;
+  scale = Math.min(Math.max(scale * delta, 1), 5);
+  updateTransform();
+});
+container.addEventListener('mousedown', e => {
+  dragging = true;
+  startX = e.clientX - posX;
+  startY = e.clientY - posY;
+  container.style.cursor = 'grabbing';
+});
+container.addEventListener('mouseup', () => { dragging = false; container.style.cursor = 'grab'; });
+container.addEventListener('mousemove', e => {
+  if (!dragging) return;
+  posX = e.clientX - startX;
+  posY = e.clientY - startY;
+  updateTransform();
+});
+function updateTransform() {
+  video.style.transform = `scale(${scale}) translate(${posX/scale}px, ${posY/scale}px)`;
+}
+function getCurrentVideoName() { return videoList[currentVideoIndex]?.name || "未命名影片"; }
+</script>
+
+</body>
+</html>
